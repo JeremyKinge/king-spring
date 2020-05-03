@@ -11,7 +11,6 @@ import java.lang.annotation.*;
 @Target({ElementType.METHOD,ElementType.TYPE})
 @Retention(RetentionPolicy.RUNTIME)
 @Documented
-@KComponent
 public @interface KRequestMapping {
 	String value() default "";
 }

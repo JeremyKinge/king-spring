@@ -11,7 +11,6 @@ import java.lang.annotation.*;
 @Target({ElementType.FIELD})
 @Retention(RetentionPolicy.RUNTIME)
 @Documented
-@KComponent
 public @interface KAutowired {
 	String value() default "";
 }

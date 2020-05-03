@@ -1,10 +1,8 @@
 package com.kingge.spring.web.servlet;
 
 
-import com.kingge.spring.stereotype.context.KComponent;
-import com.kingge.spring.stereotype.context.KController;
-import com.kingge.spring.stereotype.context.KRepository;
-import com.kingge.spring.stereotype.context.KService;
+import com.kingge.spring.stereotype.context.*;
+import com.kingge.spring.stereotype.web.KRequestMapping;
 import com.kingge.spring.utils.Constants;
 
 import javax.servlet.ServletConfig;
@@ -15,12 +13,14 @@ import javax.servlet.http.HttpServletResponse;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.net.URL;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 
 /**
@@ -41,7 +41,8 @@ public class KDispatcherServlet2 extends HttpServlet {
     //IOC容器中的bean，classNames经过了过滤后得到的
     private Map<String,Object> beanDefinitionMap = new ConcurrentHashMap<String,Object>(256);
 
-//    private Map<String,KHandlerMapping> handlerMapping = new HashMap<String,KHandlerMapping>();
+    //保存控制层，url跟处理方法的映射关系
+    private Map<String,Method> handlerMapping = new ConcurrentHashMap<String,Method>();
 
     //课后再去思考一下这样设计的经典之处
     //GPHandlerMapping最核心的设计，也是最经典的
@@ -72,6 +73,11 @@ public class KDispatcherServlet2 extends HttpServlet {
 
         //5.初始化handlerMapping，解析所有控制类的url地址和相关联的处理method
             initHandlerMapping();
+
+        Properties contextConfig1 =    this.contextConfig;
+        List<String> classNames1 =    this.classNames;
+        Map<String,Object> beanDefinitionMap1 =    this.beanDefinitionMap;
+        Map<String,Method> handlerMapping1 =    this.handlerMapping;
 
         System.out.println("[ init ]  end ....");
 
@@ -159,9 +165,15 @@ public class KDispatcherServlet2 extends HttpServlet {
                     Object instance = clazz.newInstance();
                     beanDefinitionMap.put(beanName,instance);//我们这里直接new实例放置
 
-                    //如果注解是加到接口上，那么直接使用接口的类型去自动注入
+                    //如果当前bean实现了接口，那么直接使用接口的名称为key
+                    // 接口的实现类为value（也就是当前bean实例），放到ioc容器中
+                    //接口可能多个实现类，那么怎么办呢？
+                    //判断如果ioc容器中已经存在相同的key，则抛异常
                     Class<?>[] interfaces = clazz.getInterfaces();
                     for (Class<?> i :interfaces){
+                        if( beanDefinitionMap.containsKey(i.getName()) ){
+                            throw new RuntimeException(i.getName() + " already exists  ");
+                        }
                         beanDefinitionMap.put(i.getName(),instance);
                     }
                 }
@@ -175,9 +187,87 @@ public class KDispatcherServlet2 extends HttpServlet {
     }
 
 
+    /**
+    * @Description: 解析IOC容器中的bean，并设置依赖 - DI阶段
+    * @Param: 
+    * @return: 
+    * @Author: JeremyKing
+    */
     private void diBean() {
+
+        if(beanDefinitionMap.isEmpty()){ return; }
+
+        //1.遍历所有ioc容器中的bean
+        for (Map.Entry<String,Object> entry : beanDefinitionMap.entrySet()) {
+
+            //1.1获取当前bean的所有成员属性
+            Field[] fields = entry.getValue().getClass().getDeclaredFields();
+
+            for (Field field : fields){
+                //1.1.1当前成员属性如果没有表示注入注解，那么无需注入
+                if(!field.isAnnotationPresent(KAutowired.class)){continue;}
+
+                KAutowired kautowried = field.getAnnotation(KAutowired.class);
+
+                //1.1.2 判断当前autowire注解是否声明指定注入的beanName
+                String beanName = kautowried.value().trim();
+                if("".equals(beanName)){//否则，默认取得依赖类的类名为beanName
+                    beanName = field.getType().getName();
+                }
+                field.setAccessible(true);//避免当前属性是非public修饰，那么需要添加true
+                //设置为可访问
+
+                try {
+                    //设置依赖
+                    field.set(entry.getValue(),beanDefinitionMap.get(beanName));
+                } catch (IllegalAccessException e) {
+                    e.printStackTrace();
+                }
+
+            }
+
+        }
     }
+    
+    /**
+    * @Description: 初始化handlerMapping，解析所有控制类的url地址和相关联的处理method
+    * @Param:
+    * @return:
+    * @Author: JeremyKing
+    */
     private void initHandlerMapping() {
+
+        //按照我们通常的理解应该是一个Map
+        //Map<String,Method> map;
+        //map.put(url,Method)
+        if(beanDefinitionMap.isEmpty()){ return; }
+        //首先从容器中取到所有的实例
+        for (Map.Entry<String, Object> objectEntry : beanDefinitionMap.entrySet()) {
+            Class<?> clazz = objectEntry.getValue().getClass();
+            if (!clazz.isAnnotationPresent(KController.class)) {continue;}
+
+            String baseUrl = "";
+            //判断当前控制类，是否设置了访问前缀
+            if (clazz.isAnnotationPresent(KRequestMapping.class)) {
+                KRequestMapping requestMapping = clazz.getAnnotation(KRequestMapping.class);
+                baseUrl = requestMapping.value();
+            }
+
+            //扫描所有的public方法，拼接baseUrl
+            Method[] methods = clazz.getMethods();
+            for (Method method : methods) {
+                if (!method.isAnnotationPresent(KRequestMapping.class)) {continue; }
+
+                KRequestMapping requestMapping = method.getAnnotation(KRequestMapping.class);
+                String  url = ("/"+baseUrl + "/" +requestMapping.value() )
+                        .replaceAll("/+","/");
+//                String regex = ("/" + baseUrl + requestMapping.value().replaceAll("\\*", ".*")).replaceAll("/+", "/");
+//                Pattern pattern = Pattern.compile(regex);
+                this.handlerMapping.put(url.toString(), method);
+                System.out.println("Mapping: " + url + " , " + method);
+
+            }
+        }
     }
 
 
@@ -231,11 +321,79 @@ public class KDispatcherServlet2 extends HttpServlet {
 
     @Override
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
-        //客户端处理请求
-        doDispatcher();
+
+        try {
+            //客户端处理请求
+            doDispatcher(req, resp);
+        }catch (Exception e){
+            resp.getWriter().write("<font size='25' color='blue'>500 Exception</font><br/>Details:<br/>" + Arrays.toString(e.getStackTrace()).replaceAll("\\[|\\]","")
+                    .replaceAll("\\s","\r\n") +  "<font color='green'><i>Copyright@GupaoEDU</i></font>");
+            e.printStackTrace();
+        }
     }
 
-    private void doDispatcher() {
+    private void doDispatcher(HttpServletRequest req, HttpServletResponse resp) {
+
+
+        if(this.handlerMapping.isEmpty()){ return  ;}
+
+
+        String url = req.getRequestURI();//获得绝对路径
+        //处理成相对路径
+        String contextPath = req.getContextPath();
+        url = url.replace(contextPath,"").replaceAll("/+","/");
+
+
+        try {
+            if( !this.handlerMapping.containsKey(url) ){
+                resp.getWriter().write("找不到处理类");
+                return;
+            }
+
+            //处理请求
+            Method method = this.handlerMapping.get(url);
+            //那么怎么获取当前method所在的bean实例呢？
+            //通过反射拿到method所在的class，然后拿到class的名称
+            //再调用获取beanName，然后通过BeanDefinition获取bean实例
+            String simpleName = method.getDeclaringClass().getSimpleName();
+            String beanName = lowerFirstCase(simpleName);
+
+            Map<String, String[]> parameterMap = req.getParameterMap();//获取请求参数
+            //为了方便演示，这里先写死
+            method.invoke(beanDefinitionMap.get(beanName),
+                    new Object[]{parameterMap.get("name")[0]});
+
+
+        } catch (IOException | IllegalAccessException | InvocationTargetException e) {
+            e.printStackTrace();
+        }
+
+
+//        for (GPHandlerMapping handler : this.handlerMappings) {
+//            Matcher matcher = handler.getPattern().matcher(url);
+//            if(!matcher.matches()){ continue;}
+//            return handler;
+//        }
+//
+//        return null;
+
+//        //根据用户请求的URL来获得一个Handler
+//        GPHandlerMapping handler = getHandler(req);
+//        if(handler == null){
+//            resp.getWriter().write("<font size='25' color='red'>404 Not Found</font><br/><font color='green'><i>Copyright@GupaoEDU</i></font>");
+//            return;
+//        }
+//
+//        GPHandlerAdapter ha = getHandlerAdapter(handler);
+//
+//
+//        //这一步只是调用方法，得到返回值
+//        GPModelAndView mv = ha.handle(req, resp, handler);
+//
+//
+//        //这一步才是真的输出
+//        processDispatchResult(resp, mv);
+
     }
 
 
